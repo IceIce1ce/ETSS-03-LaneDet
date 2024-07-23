@@ -24,7 +24,7 @@ Prepare for an updated version, include:
 ## Introduction
 
 ~~- Lane Detection method for CCTV-cameras using Yolov8 + SegmentAnything + ByteTrack~~
-- Lane Detection method for CCTV-cameras using RTM + Norfair + SegmentAnything + Adaptive HoughR
+- Lane Detection method for CCTV-cameras using RTM + SegmentAnything + Adaptive HoughR
 
 ## Installation
 
