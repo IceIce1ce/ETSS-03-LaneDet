@@ -5,7 +5,7 @@
 
 ### Automation Lab, Sungkyunkwan University
   
-# Lane Detection for CCTV-cameras using RTM + Norfair + SegmentAnything + Adaptive Hough
+# Lane Detection for CCTV-cameras using RTM + SegmentAnything + Adaptive Hough
 
 Prepare for an updated version, include:
 
