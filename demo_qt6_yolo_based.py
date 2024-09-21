@@ -63,6 +63,8 @@ G_Save_step = 500
 class WorkerThread(QThread):
     update_progress = pyqtSignal(dict)
     update_lane_progress = pyqtSignal(dict)
+    waiting_signal = pyqtSignal(dict)
+    end_signal = pyqtSignal(dict)
 
     def __init__(self, vid_pth, run_all_flag=False):
         super().__init__()
@@ -311,14 +313,155 @@ class WorkerThread(QThread):
                 final_tp += 1
         return bg_mat, final_tp, final_fp, final_fn
 
+    def evaluate_per_vid_v2(self, vid_pth, h, w, vp, detected_lanes, bg_img):
+        import json
+        from shapely.geometry import Polygon
+
+        def approximate_gt_to_line(points):
+            no_points = len(points)
+
+            f_p1 = 0
+            f_p2 = 0
+            min_dist = np.inf
+
+            for p1_idx in range(0, no_points):
+                for p2_idx in range(0, no_points):
+                    cur_d = 0
+                    for p3_idx in range(0, no_points):
+                        if (p1_idx != p2_idx) and (p1_idx != p3_idx) and (p2_idx != p3_idx):
+                            p1 = np.array([points[p1_idx][0], points[p1_idx][1]])
+                            p2 = np.array([points[p2_idx][0], points[p2_idx][1]])
+                            p3 = np.array([points[p3_idx][0], points[p3_idx][1]])
+                            cur_d += np.linalg.norm(np.cross(p2 - p1, p1 - p3)) / np.linalg.norm(p2 - p1)
+                    if cur_d < min_dist and cur_d != 0:
+                        min_dist = cur_d
+                        f_p1 = p1_idx
+                        f_p2 = p2_idx
+
+            # print(f_p1, f_p2)
+            return points[f_p1], points[f_p2]
+
+        def line_to_end_point(points, h, w):
+            m = (points[0][1] - points[1][1]) / (points[0][0] - points[1][0])
+            b = points[0][1] - m * points[0][0]
+
+            x_low = ((h - 1) - b) / m
+            x_high = - b / m
+
+            return (int(x_high), 0), (int(x_low), h - 1)
+
+        def get_area_between_2_lines(detected_lane, gt_lane, line_width=30):
+
+            def polygon_with_witdh(line, line_width):
+                line_rect = Polygon([
+                    [line[0][0] - line_width, line[0][1]],
+                    [line[0][0] + line_width, line[0][1]],
+                    [line[1][0] + line_width, line[1][1]],
+                    [line[1][0] - line_width, line[1][1]]
+                ]
+                )
+                return line_rect
+
+            d_line_rect = polygon_with_witdh(detected_lane, line_width)
+            g_line_rect = polygon_with_witdh(gt_lane, line_width)
+
+            overlap_ratio = d_line_rect.intersection(g_line_rect).area / g_line_rect.area
+
+            return overlap_ratio
+
+        def get_gt_lane_point(gt_jsonf):
+            lane_points = []
+            f = open(gt_jsonf)
+            data = json.load(f)
+            f.close()
+
+            shapes = data['shapes']
+            for shape in shapes:
+                points = shape['points']
+                lp1, lp2 = approximate_gt_to_line(points)
+                lane_points.append([lp1, lp2])
+
+            return lane_points
+
+        def reformat_detected_lanes(vp, lane_point_list, h):
+            detected_lanes = []
+
+            for line_p in lane_point_list:
+                detected_lanes.append([int(vp[0]), int(vp[1]), int(line_p), h - 1])
+
+            return detected_lanes
+
+        gt_jsonf = vid_pth.replace('.mkv', '.json')
+        gt_jsonf = gt_jsonf.replace('selected_vid', 'label')
+        gt_lane = get_gt_lane_point(gt_jsonf)
+
+        bg_mat = bg_img.copy()
+
+        end_d_lanes = []
+        end_g_lanes = []
+
+        for lane in gt_lane:
+            top_p, bot_p = line_to_end_point(lane, h, w)
+            bg_mat = cv2.line(bg_mat, top_p, bot_p,
+                              (0, 0, 255), 3, cv2.LINE_AA)
+            end_g_lanes.append([top_p, bot_p])
+
+        for d_lane in detected_lanes:
+            top_p = (int(d_lane[0][0]), int(d_lane[0][1]))
+            bot_p = (int(d_lane[1][0]), int(d_lane[1][1]))
+            bg_mat = cv2.line(bg_mat, top_p, bot_p,
+                              (0, 255, 255), 3, cv2.LINE_AA)
+            end_d_lanes.append([top_p, bot_p])
+
+        area_lanes = np.full((len(end_d_lanes), 2), -1, dtype=np.float32)
+        area_lanes_ratio = np.full((len(end_d_lanes), len(end_g_lanes)), 0, dtype=float)
+
+        for idx_d, d_lane in enumerate(end_d_lanes):
+            for idx_gt, gt_lane in enumerate(end_g_lanes):
+                overlap_ratio = get_area_between_2_lines(d_lane, gt_lane, line_width=5)
+                area_lanes_ratio[idx_d][idx_gt] = overlap_ratio
+
+            best_ind_match = np.argmax(area_lanes_ratio[idx_d])
+            area_lanes[idx_d][0] = best_ind_match
+            area_lanes[idx_d][1] = area_lanes_ratio[idx_d][best_ind_match]
+
+        final_tp = 0
+        final_fp = 0
+        final_fn = 0
+
+        gt_matched_mat = np.zeros((len(end_g_lanes), 2))
+        # print(area_lanes_ratio)
+        # print(area_lanes)
+
+        for area_lane in area_lanes:
+            matched_gt_id, conf_score = area_lane
+            matched_gt_id = int(matched_gt_id)
+            if gt_matched_mat[matched_gt_id][1] == 0:
+                gt_matched_mat[matched_gt_id][1] = conf_score
+                gt_matched_mat[matched_gt_id][0] = matched_gt_id
+            else:
+                final_fp += 1
+                if gt_matched_mat[matched_gt_id][1] < conf_score:
+                    gt_matched_mat[matched_gt_id][1] = conf_score
+                    gt_matched_mat[matched_gt_id][0] = matched_gt_id
+
+        # print(gt_matched_mat)
+        for final_lane_mat in gt_matched_mat:
+            lane_id, conf_score = final_lane_mat
+
+            if conf_score == 0:
+                final_fn += 1
+            else:
+                final_tp += 1
+        return bg_mat, final_tp, final_fp, final_fn
+
     def run_a_vid(self, cur_vid_pth, idx_vid):
         vid_name = cur_vid_pth.split('/')[-1].split('.')[0]
         print(vid_name)
-
         # bg_img_pth = G_Background_Path + vid_name
         # if (Path.exists(Path(bg_img_pth)) == False):
         #     os.mkdir(bg_img_pth)
-        #
+
         # grid_img_pth = G_Grid_Path + vid_name
         # if (Path.exists(Path(grid_img_pth)) == False):
         #     os.mkdir(grid_img_pth)
@@ -354,7 +497,7 @@ class WorkerThread(QThread):
                         sam_masks, keep_mask_list, sam_viz = self.segment_bg_wSAM(bg_ret.copy(),
                                                                                   lane_cctv.mask_generator)
                         lane_divider_module = Lane_Divider_Module()
-                        final_sam_img, final_lane, vp, lane_p_list = lane_divider_module.run(sam_masks, keep_mask_list,
+                        final_sam_img, final_lane, vp, lane_p_list = lane_divider_module.run_v2(sam_masks, keep_mask_list,
                                                                                              lane_cctv.track_grid_module.list_of_active_grid(),
                                                                                              grid_mask,
                                                                                              bg_ret.copy())
@@ -370,7 +513,7 @@ class WorkerThread(QThread):
                         # with open('results/temp_files/' + vid_name + '.pkl', 'wb') as save_dict_f:
                         #     pickle.dump(save_dict, save_dict_f)
 
-                        eval_mat, final_tp, final_fp, final_fn = self.evaluate_per_vid(cur_vid_pth, h, w, vp, lane_p_list, bg_ret)
+                        eval_mat, final_tp, final_fp, final_fn = self.evaluate_per_vid_v2(cur_vid_pth, h, w, vp, lane_p_list, bg_ret)
                         no_detected_lanes = final_tp + final_fp
                         final_P = 0
                         final_R = 0
@@ -421,11 +564,11 @@ class WorkerThread(QThread):
                         })
 
                 else:
-                    frame_log = 'Searching for a right frame to start'
-                    # print(frame_log, frame_counter)
+                    frame_log = 'Searching for a right frame to start - current frame %d \n' % frame_counter
+                    self.waiting_signal.emit({
+                        'frame_log': frame_log
+                    })
                 frame_counter += 1
-
-
             else:
                 break
 
@@ -440,6 +583,11 @@ class WorkerThread(QThread):
         self.vid_list = sorted(vid_pth_list)
         self.reset_flag_for_new_session()
 
+        save_result_pth = 'results/lane/'
+        if os.path.isdir(save_result_pth) == False:
+            print('Make folder')
+            os.mkdir(save_result_pth)
+
         if self.run_all_flag:
             for vid_idx in range(0, len(self.vid_list)):
             # for vid_idx in range(0, 1):
@@ -450,7 +598,6 @@ class WorkerThread(QThread):
                 time.sleep(5)
 
             # Write overall evaluation file
-            save_result_pth = 'results/lane/'
             eval_file = open(save_result_pth + 'evaluation.txt', "w")
             eval_file.write("Total videos: %d\n"%len(self.vid_list))
             for vid_idx in range(0, len(self.vid_list)):
@@ -470,6 +617,15 @@ class WorkerThread(QThread):
                             'Acc: %f\n' % round(np.average(self.accuracy), 2)
             )
             eval_file.close()
+
+            self.end_signal.emit({
+                'frame_log':
+                "\n--------------------------------------------------------\n" +
+                "Average results for all videos: \n" +
+                'Precision: %f\t' % round(np.average(self.precision), 2) +
+                'Recall: %f\t' % round(np.average(self.recall), 2) +
+                'Acc: %f\n' % round(np.average(self.accuracy), 2)
+            })
 
         else:
             for vid_idx in range(0, len(self.vid_list)):
@@ -560,12 +716,20 @@ class MyDemo(QMainWindow):
         self.lane_roi_label.setPixmap(grid_mask_img_pixel)
         self.console_log_QTB.setText(img_dict['frame_log'])
 
+    def update_frame_log_waiting(self, dict):
+        self.console_log_QTB.setText(dict['frame_log'])
+
+    def update_frame_log_end(self, dict):
+        self.console_log_QTB.setText(dict['frame_log'])
+
     def run_all_dataset(self):
         self.run_all_flag = True
         self.worker = WorkerThread(self.cur_vid_pth, run_all_flag=self.run_all_flag)
         self.worker.start()
         self.worker.update_progress.connect(self.run_cctv_update_progress)
         self.worker.update_lane_progress.connect(self.update_seg_lane)
+        self.worker.waiting_signal.connect(self.update_frame_log_waiting)
+        self.worker.end_signal.connect(self.update_frame_log_end)
 
 
 def main_demo():
