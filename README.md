@@ -5,15 +5,15 @@
 
 ### Automation Lab, Sungkyunkwan University
   
-# Lane Detection for CCTV-cameras using RTM + SegmentAnything + Adaptive Hough
+# Lane Detection for CCTV-cameras using Yolov8 + SegmentAnything + Adaptive Hough Transform with UI
 
 Prepare for an updated version, include:
 
-- Background subtraction module
-![/Background_Subtraction_Example](.github/vis_img/background_subtraction_module.PNG)
+- UI for the CCTV lane detection program
+![/UI for the CCTV lane detection program](.github/vis_img/Lane_CCTV_UI.png)
 - Segment Anything module -> Generate Lane segments
 ![/Segment_Anything_Example](.github/vis_img/segment_anything_module.png)
-- RTM model -> detect vehicles
+- Yolov8 model -> detect vehicles
 - Overall Process
   ![/Overall_Process_Example](.github/vis_img/CamID_59_20230713_102533_05.png)
 
@@ -24,7 +24,7 @@ Prepare for an updated version, include:
 ## Introduction
 
 ~~- Lane Detection method for CCTV-cameras using Yolov8 + SegmentAnything + ByteTrack~~
-- Lane Detection method for CCTV-cameras using RTM + SegmentAnything + Adaptive HoughR
+- Lane Detection method for CCTV-cameras using RTM + SegmentAnything + Adaptive Hough Transform
 
 ## Installation
 
