@@ -19,14 +19,28 @@ Prepare for an updated version, include:
 
 ## Introduction
 
-~~- Lane Detection method for CCTV-cameras using Yolov8 + SegmentAnything + ByteTrack~~
-- Lane Detection method for CCTV-cameras using RTM + SegmentAnything + Adaptive Hough Transform
+- Lane Detection method for CCTV cameras using Yolov8 + SegmentAnything + Adaptive Hough Transform
 
 ## Installation
 
 ### Create conda env
+```Shell
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+```
 
 ### Activate env
+
+### Install conda and activate the environemnt
+```Shell
+mkdir -p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 
+rm -rf ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash
+
+conda create -n cctv_lane_ui
+conda activate cctv_lane_ui
+```
 
 ### Install pytorch
 
