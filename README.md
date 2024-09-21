@@ -45,27 +45,18 @@ conda activate cctv_lane_ui
 ### Install pytorch
 
 ```Shell
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
 ```
 
-### Install mmdetection
+### Install sahi -> PyQT6 -> boxmot -> ultralytics
 ```Shell
-pip install -U openmim
-mim install mmengine
-mim install "mmcv>=2.0.0"
-
-
-git clone https://github.com/open-mmlab/mmdetection.git
-cd mmdetection
-pip install -v -e .
+pip install sahi
+pip install PyQt6
+pip install boxmot
+pip install ultralytics
 ```
 
-### Install Norfair
-```Shell
-pip install norfair[metrics,video]
-```
-
-### Install SegmentAnything
+### Install Segment Anything
 ```Shell
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
