@@ -10,15 +10,8 @@
 Prepare for an updated version, include:
 
 - UI for the CCTV lane detection program
-  
-   ![/UI for the CCTV lane detection program](.github/Lane_CCTV_UI.png)
 
-- Segment Anything module -> Generate Lane segments
-![/Segment_Anything_Example](.github/vis_img/segment_anything_module.png)
-
-- Yolov8 model -> detect vehicles
-- Overall Process
-  ![/Overall_Process_Example](.github/vis_img/CamID_59_20230713_102533_05.png)
+![/UI for the CCTV lane detection program](.github/Lane_CCTV_UI.png)
 
 </div>
 
