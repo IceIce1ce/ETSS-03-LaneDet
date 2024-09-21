@@ -10,6 +10,7 @@
 Prepare for an updated version, include:
 
 - UI for the CCTV lane detection program
+  
    ![/UI for the CCTV lane detection program](.github/Lane_CCTV_UI.png)
 
 - Segment Anything module -> Generate Lane segments
