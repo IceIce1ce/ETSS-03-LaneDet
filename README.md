@@ -62,6 +62,19 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
 
 ### Create folder as the following structure
+```Shell
+Edge-TSS
+├── src
+│   ├── dataset
+│   │   ├── selected_vid
+│   ├── results
+│   │   ├── bg_sub
+│   │   ├── grid
+│   │
+│   │  
+```
+ 
+
 
 ## Getting Started
 
