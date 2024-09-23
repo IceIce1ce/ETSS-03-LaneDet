@@ -1,0 +1,735 @@
+from utils import Pita_Util
+
+from sahi import AutoDetectionModel
+from sahi.predict import get_sliced_prediction
+import cv2
+import numpy as np
+from pathlib import Path
+from boxmot import BYTETracker
+
+from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+
+from background_subtraction import Background_Subtraction_Module
+from track_grid_module import Track_Grid_Module
+from lane_divider import Lane_Divider_Module
+
+import time
+import math
+
+pita_Util_module = Pita_Util('')
+
+vid_fol_pth = 'dataset/selected_vid/'
+
+
+def get_first_frame_from_vid(vid_path):
+    cap = cv2.VideoCapture(vid_path)
+    if (cap.isOpened() == False):
+        print("Error opening video stream or file")
+    _, first_frame = cap.read()
+    h, w, _ = first_frame.shape
+    cap.release()
+
+    return first_frame, h, w
+
+
+def remove_notmoving_obj(tracked_objs, active_stracks, moving_threshold=50):
+
+    moving_history_list = []
+
+    for strack in active_stracks:
+        if strack.is_activated:
+            obj_past_detections = strack.history_observations
+
+            if(len(obj_past_detections) > 2):
+                start_detection = obj_past_detections[0]
+                end_detection = obj_past_detections[-1]
+
+                start_center = [start_detection[2] - start_detection[0],  start_detection[3] - start_detection[1]]
+                end_center = [end_detection[2] - end_detection[0],  end_detection[3] - end_detection[1]]
+
+                dist_x = (start_center[0] - end_center[0])
+                dist_y = (start_center[1] - end_center[1])
+                dist = math.sqrt(dist_x ** 2 + dist_y ** 2)
+
+                if (dist < moving_threshold):
+                    moving_history_list.append(obj_past_detections)
+
+    return moving_history_list
+
+
+def segment_bg_wSAM(bg_img, mask_generator):
+
+    def generate_keep_mask_list(anns, bg_img_white_mask):
+        keep_id_list = []
+
+        if len(anns) == 0:
+            return keep_id_list
+        sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
+
+        bg_img_white_mask = bg_img_white_mask / 255
+
+        img_all = np.zeros((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 3))
+        img_filtered = np.zeros((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 3))
+        # img[:,:,3] = 0
+        for idx_m in range(0, len(sorted_anns)):
+            m = sorted_anns[idx_m]['segmentation']
+            m_area = np.sum(m)
+            m_white_area = np.sum(m * bg_img_white_mask)
+
+            color_mask = np.random.random(3) * 255
+            img_all[m] = color_mask
+            if (m_area < 500 and m_area > 50):
+                if (m_white_area / m_area > 0.25):
+                    keep_id_list.append(idx_m)
+                    img_filtered[m] = color_mask
+
+        # cv2.imshow('SAM results', img)
+        # cv2.imshow('SAM results remove', img_test)
+
+        return sorted_anns, keep_id_list, img_filtered
+
+    def generate_sam_viz(anns, bg_img):
+        keep_id_list = []
+
+        if len(anns) == 0:
+            return keep_id_list
+        sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
+
+        img_all = np.zeros((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4),
+                           dtype=np.float32)
+        img_all[:, :, 3] = 0
+        img_all[:, :, 0:3] = bg_img
+
+        for idx_m in range(0, len(sorted_anns)):
+            m = sorted_anns[idx_m]['segmentation']
+            color_mask = np.concatenate([np.random.random(3), [0.35]])
+            img_all[m] = color_mask
+
+        return cv2.cvtColor(img_all, cv2.COLOR_BGRA2BGR)
+
+    sam_masks = mask_generator.generate(bg_img.copy())
+
+    _, bg_img_white_mask = cv2.threshold(cv2.cvtColor(bg_img.copy(), cv2.COLOR_BGR2GRAY), 150, 255, cv2.THRESH_BINARY)
+
+    sorted_masks, keep_mask_list, sam_normal_img = generate_keep_mask_list(sam_masks, bg_img_white_mask)
+    sam_normal_img_all = generate_sam_viz(sam_masks, bg_img)
+
+    return sorted_masks, keep_mask_list, sam_normal_img_all
+
+
+class Lane_Detection():
+
+    def __init__(self, show_flag):
+        self.detection_model = AutoDetectionModel.from_pretrained(
+            model_type='yolov8',
+            model_path='yolov8l.pt',
+            confidence_threshold=0.1,
+            device="cuda:0",  # or 'cuda:0'
+        )
+        self.show_flag = show_flag
+        self.lane_estimate_flag = False
+        # self.lane_estimate_flag = True
+
+        self.mask_generator = self.sam_initialize()
+
+
+    def sam_initialize(self):
+        device = "cuda:0"
+        sam = sam_model_registry["default"](checkpoint= "weights/sam_vit_h_4b8939.pth")
+        sam.to(device=device)
+        mask_generator = SamAutomaticMaskGenerator(
+            model=sam,
+            points_per_side=128,
+            pred_iou_thresh=0.7,
+            stability_score_thresh=0.9,
+            # stability_score_offset = 1.0,
+            # box_nms_thresh = 0.7,
+            # crop_n_layers = 0,
+            # crop_nms_thresh = 0.7,
+            # crop_overlap_ratio = 512 / 1500,
+            # crop_n_points_downscale_factor = 1,
+            # point_grids: Optional[List[np.ndarray]] = None,
+            min_mask_region_area=250,
+        )
+        return mask_generator
+
+
+
+    def new_vid_input(self, first_frame, h, w):
+        self.tracker = BYTETracker(
+            track_thresh=0.45,
+            match_thresh=0.8,
+            track_buffer=25,
+            frame_rate=30
+        )
+        self.bg_sub_module = Background_Subtraction_Module(first_frame)
+        self.track_grid_module = Track_Grid_Module(w, h, grid_step=30)
+
+
+    def draw_detection_and_tracking(self, im, tracks):
+        color = (0, 0, 255)  # BGR
+        thickness = 2
+        fontscale = 0.5
+
+        draw_im = im.copy()
+        xyxys = tracks[:, 0:4].astype('int')  # float64 to int
+        ids = tracks[:, 4].astype('int')  # float64 to int
+        confs = tracks[:, 5].round(decimals=2)
+        clss = tracks[:, 6].astype('int')  # float64 to int
+        inds = tracks[:, 7].astype('int')  # float64 to int
+
+        # print bboxes with their associated id, cls and conf
+        for xyxy, id, conf, cls in zip(xyxys, ids, confs, clss):
+            if (cls == 2 or cls == 3):
+                draw_im = cv2.rectangle(
+                    draw_im,
+                    (xyxy[0], xyxy[1]),
+                    (xyxy[2], xyxy[3]),
+                    color,
+                    thickness
+                )
+                cv2.putText(
+                    draw_im,
+                    f'id: {id}, conf: {conf}, c: {cls}',
+                    (xyxy[0], xyxy[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    fontscale,
+                    color,
+                    thickness
+                )
+        return draw_im
+
+
+    def run(self, im):
+        result = get_sliced_prediction(
+            im,
+            self.detection_model,
+            slice_height=736,
+            slice_width=1280,
+            overlap_height_ratio=0.2,
+            overlap_width_ratio=0.2,
+            verbose=False
+        )
+
+        h, w, c = im.shape
+        num_predictions = len(result.object_prediction_list)
+        dets = np.zeros([num_predictions, 6], dtype=np.float32)
+        for ind, object_prediction in enumerate(result.object_prediction_list):
+            dets[ind, :4] = np.array(object_prediction.bbox.to_xyxy(), dtype=np.float32)
+            dets[ind, 4] = object_prediction.score.value
+            dets[ind, 5] = object_prediction.category.id
+
+        tracks = self.tracker.update(dets, im)  # --> (x, y, x, y, id, conf, cls, ind)
+
+        if tracks.shape[0] != 0:
+            det_and_track_ret = self.draw_detection_and_tracking(im, tracks)
+        else:
+            det_and_track_ret = im.copy()
+
+        history_moving_active_tracks = remove_notmoving_obj(tracks, self.tracker.active_tracks)
+
+        if tracks.shape[0] != 0:
+            self.bg_sub_module.update_usingYoloTrack(im, tracks)
+
+        self.track_grid_module.update_per_object_yolo(history_moving_active_tracks)
+
+        if self.show_flag or self.lane_estimate_flag:
+
+            background_colored = cv2.cvtColor(self.bg_sub_module.background, cv2.COLOR_GRAY2BGR)
+            grid_ap = self.track_grid_module.list_of_active_grid()
+            grid_ap_show = self.track_grid_module.display_selected_point(grid_ap, background_colored.copy())
+            grid_mask = np.zeros((h, w))
+            if len(grid_ap) > 10:
+                grid_mask = self.track_grid_module.generate_grid_RoI(grid_ap, background_colored.copy())
+
+            grid_mask_rgb_img = np.zeros((grid_mask.shape[0], grid_mask.shape[1], 3), dtype=np.uint8)
+            grid_mask_rgb_img[:, :, 0] = grid_mask * 255
+            grid_mask_rgb_img[:, :, 1] = grid_mask * 255
+            grid_mask_rgb_img[:, :, 2] = grid_mask * 255
+
+            return det_and_track_ret, background_colored, grid_mask_rgb_img, grid_ap_show, grid_mask
+
+
+        return det_and_track_ret
+
+        # return det_and_track_ret, background_colored, grid_mask_rgb_img, grid_ap_show
+
+
+    def run_debug(self, im):
+        result = get_sliced_prediction(
+            im,
+            self.detection_model,
+            slice_height=736,
+            slice_width=1280,
+            overlap_height_ratio=0.2,
+            overlap_width_ratio=0.2,
+            verbose=False
+        )
+
+        h, w, c = im.shape
+        num_predictions = len(result.object_prediction_list)
+        dets = np.zeros([num_predictions, 6], dtype=np.float32)
+        for ind, object_prediction in enumerate(result.object_prediction_list):
+            dets[ind, :4] = np.array(object_prediction.bbox.to_xyxy(), dtype=np.float32)
+            dets[ind, 4] = object_prediction.score.value
+            dets[ind, 5] = object_prediction.category.id
+
+        tracks = self.tracker.update(dets, im)  # --> (x, y, x, y, id, conf, cls, ind)
+
+        if tracks.shape[0] != 0:
+            det_and_track_ret = self.draw_detection_and_tracking(im, tracks)
+        else:
+            det_and_track_ret = im.copy()
+
+        history_moving_active_tracks = remove_notmoving_obj(tracks, self.tracker.active_tracks)
+
+        if tracks.shape[0] != 0:
+            self.bg_sub_module.update_usingYoloTrack(im, tracks)
+
+        self.track_grid_module.update_per_object_yolo(history_moving_active_tracks)
+
+        background_colored = cv2.cvtColor(self.bg_sub_module.background, cv2.COLOR_GRAY2BGR)
+        grid_ap = self.track_grid_module.list_of_active_grid()
+        grid_ap_show = self.track_grid_module.display_selected_point(grid_ap, background_colored.copy())
+        grid_mask = np.zeros((h, w))
+        if len(grid_ap) > 10:
+            grid_mask = self.track_grid_module.generate_grid_RoI(grid_ap, background_colored.copy())
+
+        grid_mask_rgb_img = np.zeros((grid_mask.shape[0], grid_mask.shape[1], 3), dtype=np.uint8)
+        grid_mask_rgb_img[:, :, 0] = grid_mask * 255
+        grid_mask_rgb_img[:, :, 1] = grid_mask * 255
+        grid_mask_rgb_img[:, :, 2] = grid_mask * 255
+
+        return det_and_track_ret, background_colored, grid_mask_rgb_img, grid_ap_show, grid_mask
+
+
+def evaluate_per_vid_v2(vid_pth, h, w, vp, detected_lanes, bg_img):
+	import json
+	from shapely.geometry import Polygon
+
+	def approximate_gt_to_line(points):
+		no_points = len(points)
+
+		f_p1 = 0
+		f_p2 = 0
+		min_dist = np.inf
+
+		for p1_idx in range(0, no_points):
+			for p2_idx in range(0, no_points):
+				cur_d = 0
+				for p3_idx in range(0, no_points):
+					if (p1_idx != p2_idx) and (p1_idx != p3_idx) and (p2_idx != p3_idx):
+						p1 = np.array([points[p1_idx][0], points[p1_idx][1]])
+						p2 = np.array([points[p2_idx][0], points[p2_idx][1]])
+						p3 = np.array([points[p3_idx][0], points[p3_idx][1]])
+						cur_d += np.linalg.norm(np.cross(p2 - p1, p1 - p3)) / np.linalg.norm(p2 - p1)
+				if cur_d < min_dist and cur_d != 0:
+					min_dist = cur_d
+					f_p1 = p1_idx
+					f_p2 = p2_idx
+
+		# print(f_p1, f_p2)
+		return points[f_p1], points[f_p2]
+
+	def line_to_end_point(points, h, w):
+		m = (points[0][1] - points[1][1]) / (points[0][0] - points[1][0])
+		b = points[0][1] - m * points[0][0]
+
+		x_low = ((h - 1) - b) / m
+		x_high = - b / m
+
+		return (int(x_high), 0), (int(x_low), h - 1)
+
+	def get_area_between_2_lines(detected_lane, gt_lane, line_width=30):
+
+		def polygon_with_witdh(line, line_width):
+			line_rect = Polygon([
+				[line[0][0] - line_width, line[0][1]],
+				[line[0][0] + line_width, line[0][1]],
+				[line[1][0] + line_width, line[1][1]],
+				[line[1][0] - line_width, line[1][1]]
+			]
+			)
+			return line_rect
+
+		d_line_rect = polygon_with_witdh(detected_lane, line_width)
+		g_line_rect = polygon_with_witdh(gt_lane, line_width)
+
+		overlap_ratio = d_line_rect.intersection(g_line_rect).area / g_line_rect.area
+
+		return overlap_ratio
+
+	def get_gt_lane_point(gt_jsonf):
+		lane_points = []
+		f = open(gt_jsonf)
+		data = json.load(f)
+		f.close()
+
+		shapes = data['shapes']
+		for shape in shapes:
+			points = shape['points']
+			lp1, lp2 = approximate_gt_to_line(points)
+			lane_points.append([lp1, lp2])
+
+		return lane_points
+
+	def reformat_detected_lanes(vp, lane_point_list, h):
+		detected_lanes = []
+
+		for line_p in lane_point_list:
+			detected_lanes.append([int(vp[0]), int(vp[1]), int(line_p), h - 1])
+
+		return detected_lanes
+
+	gt_jsonf = vid_pth.replace('.mkv', '.json')
+	gt_jsonf = gt_jsonf.replace('selected_vid', 'label')
+	gt_lane = get_gt_lane_point(gt_jsonf)
+
+
+	bg_mat = bg_img.copy()
+
+	end_d_lanes = []
+	end_g_lanes = []
+
+	for lane in gt_lane:
+		top_p, bot_p = line_to_end_point(lane, h, w)
+		bg_mat = cv2.line(bg_mat, top_p, bot_p,
+						  (0, 0, 255), 3, cv2.LINE_AA)
+		end_g_lanes.append([top_p, bot_p])
+
+	for d_lane in detected_lanes:
+		top_p = (int(d_lane[0][0]), int(d_lane[0][1]))
+		bot_p = (int(d_lane[1][0]), int(d_lane[1][1]))
+		bg_mat = cv2.line(bg_mat, top_p, bot_p,
+						  (0, 255, 255), 3, cv2.LINE_AA)
+		end_d_lanes.append([top_p, bot_p])
+
+	area_lanes = np.full((len(end_d_lanes), 2), -1, dtype=np.float32)
+	area_lanes_ratio = np.full((len(end_d_lanes), len(end_g_lanes)), 0, dtype=float)
+
+	for idx_d, d_lane in enumerate(end_d_lanes):
+		for idx_gt, gt_lane in enumerate(end_g_lanes):
+			overlap_ratio = get_area_between_2_lines(d_lane, gt_lane, line_width=5)
+			area_lanes_ratio[idx_d][idx_gt] = overlap_ratio
+
+		best_ind_match = np.argmax(area_lanes_ratio[idx_d])
+		area_lanes[idx_d][0] = best_ind_match
+		area_lanes[idx_d][1] = area_lanes_ratio[idx_d][best_ind_match]
+
+	final_tp = 0
+	final_fp = 0
+	final_fn = 0
+
+	gt_matched_mat = np.zeros((len(end_g_lanes), 2))
+	# print(area_lanes_ratio)
+	# print(area_lanes)
+
+	for area_lane in area_lanes:
+		matched_gt_id, conf_score = area_lane
+		matched_gt_id = int(matched_gt_id)
+		if gt_matched_mat[matched_gt_id][1] == 0:
+			gt_matched_mat[matched_gt_id][1] = conf_score
+			gt_matched_mat[matched_gt_id][0] = matched_gt_id
+		else:
+			final_fp += 1
+			if gt_matched_mat[matched_gt_id][1] < conf_score:
+				gt_matched_mat[matched_gt_id][1] = conf_score
+				gt_matched_mat[matched_gt_id][0] = matched_gt_id
+
+	# print(gt_matched_mat)
+	for final_lane_mat in gt_matched_mat:
+		lane_id, conf_score = final_lane_mat
+
+		if conf_score == 0:
+			final_fn += 1
+		else:
+			final_tp += 1
+	return bg_mat, final_tp, final_fp, final_fn
+
+
+def evaluate_per_vid(vid_pth, h, w, vp, lane_point_list, bg_img):
+    import json
+    from shapely.geometry import Polygon
+
+    def approximate_gt_to_line(points):
+        no_points = len(points)
+
+        f_p1 = 0
+        f_p2 = 0
+        min_dist = np.inf
+
+
+        for p1_idx in range(0, no_points):
+            for p2_idx in range(0, no_points):
+                cur_d = 0
+                for p3_idx in range(0, no_points):
+                    if (p1_idx != p2_idx) and (p1_idx != p3_idx) and (p2_idx != p3_idx):
+                        p1 = np.array([points[p1_idx][0], points[p1_idx][1]])
+                        p2 = np.array([points[p2_idx][0], points[p2_idx][1]])
+                        p3 = np.array([points[p3_idx][0], points[p3_idx][1]])
+                        cur_d += np.linalg.norm(np.cross(p2 - p1, p1 - p3)) / np.linalg.norm(p2 - p1)
+                if cur_d < min_dist and cur_d != 0:
+                    min_dist = cur_d
+                    f_p1 = p1_idx
+                    f_p2 = p2_idx
+
+        # print(f_p1, f_p2)
+        return points[f_p1], points[f_p2]
+
+
+    def line_to_end_point(points, h, w):
+        m = (points[0][1] - points[1][1]) / (points[0][0] - points[1][0])
+        b = points[0][1] - m * points[0][0]
+
+        x_low = ((h - 1) - b) / m
+        x_high = - b / m
+
+        return (int(x_high), 0), (int(x_low), h-1, )
+
+
+    def get_area_between_2_lines(detected_lane, gt_lane, line_width=30):
+
+        def polygon_with_witdh(line, line_width):
+            line_rect = Polygon([
+                [line[0][0] - line_width, line[0][1]],
+                [line[0][0] + line_width, line[0][1]],
+                [line[1][0] + line_width, line[1][1]],
+                [line[1][0] - line_width, line[1][1]]
+                ]
+            )
+            return line_rect
+
+        d_line_rect = polygon_with_witdh(detected_lane, line_width)
+        g_line_rect = polygon_with_witdh(gt_lane, line_width)
+
+        overlap_ratio = d_line_rect.intersection(g_line_rect).area / g_line_rect.area
+
+        return overlap_ratio
+
+
+    def get_gt_lane_point(gt_jsonf):
+        lane_points = []
+        f = open(gt_jsonf)
+        data = json.load(f)
+        f.close()
+
+        shapes = data['shapes']
+        for shape in shapes:
+            points = shape['points']
+            lp1, lp2 = approximate_gt_to_line(points)
+            lane_points.append([lp1, lp2])
+
+        return lane_points
+
+
+    def reformat_detected_lanes(vp, lane_point_list, h):
+        detected_lanes = []
+
+        for line_p in lane_point_list:
+            detected_lanes.append([int(vp[0]), int(vp[1]), int(line_p), h-1])
+
+        return detected_lanes
+
+
+    gt_jsonf = ('dataset/label/' + vid_pth).replace('.mkv', '.json')
+    gt_lane = get_gt_lane_point(gt_jsonf)
+
+    detected_lanes = reformat_detected_lanes(vp, lane_point_list, h)
+
+    bg_mat = bg_img.copy()
+
+    end_d_lanes = []
+    end_g_lanes = []
+
+    for lane in gt_lane:
+        top_p, bot_p = line_to_end_point(lane, h, w)
+        bg_mat = cv2.line(bg_mat, top_p, bot_p,
+                          (0, 0, 255), 3, cv2.LINE_AA)
+        end_g_lanes.append([top_p, bot_p])
+
+    for d_lane in detected_lanes:
+        top_p, bot_p = line_to_end_point([[d_lane[0], d_lane[1]], [d_lane[2], d_lane[3]]], h, w)
+        bg_mat = cv2.line(bg_mat, top_p, bot_p,
+                          (0, 255, 255), 3, cv2.LINE_AA)
+        end_d_lanes.append([top_p, bot_p])
+
+    area_lanes = np.full((len(end_d_lanes), 2), -1, dtype=np.float32)
+    area_lanes_ratio = np.full((len(end_d_lanes), len(end_g_lanes)), 0, dtype=float)
+
+    for idx_d, d_lane in enumerate(end_d_lanes):
+        for idx_gt, gt_lane in enumerate(end_g_lanes):
+            overlap_ratio = get_area_between_2_lines(d_lane, gt_lane)
+            area_lanes_ratio[idx_d][idx_gt] = overlap_ratio
+
+        best_ind_match = np.argmax(area_lanes_ratio[idx_d])
+        area_lanes[idx_d][0] = best_ind_match
+        area_lanes[idx_d][1] = area_lanes_ratio[idx_d][best_ind_match]
+
+    # print(area_lanes_ratio)
+    print(area_lanes)
+    print(len(end_d_lanes), len(end_g_lanes))
+    print(len(np.where(area_lanes[:, 1] > 0.5)[0]), len(end_g_lanes))
+
+    return bg_mat
+
+
+def main():
+    vid_name_list = pita_Util_module.get_list_of_file_in_a_path(vid_fol_pth)
+    vid_name_list = sorted(vid_name_list)
+
+    start_frame =   [310, 180, 210, 215, 75,  110,  75, 550,  45, 150,  5, 25, 530,  5,  0,  90,   0,  30,  20,  70,  0]
+    end_frame =     [390, 260, 270, 515, 120, 170, 150, 615, 120, 210, 90, 95, 590, 90, 75, 165, 165, 105, 225, 165, 90]
+
+    # model = YOLO('yolov8m.pt')  # load a pretrained model (recommended for training)
+    # model = RTDETR('rtdetr-l.pt')
+
+    lane_cctv = Lane_Detection(show_flag=True)
+
+
+    for idx_vid in range (0, len(vid_name_list)):
+    # for idx_vid in range(0, 3):
+        print(vid_fol_pth + vid_name_list[idx_vid])
+
+        frame_counter = 0
+        first_frame, h, w = get_first_frame_from_vid(vid_fol_pth + vid_name_list[idx_vid])
+        cap = cv2.VideoCapture(vid_fol_pth + vid_name_list[idx_vid])
+        lane_cctv.new_vid_input(first_frame, h, w)
+
+
+        if (cap.isOpened() == False):
+            print("Error opening video stream or file")
+        _, frame = cap.read()
+
+        frame_counter = 0
+
+        start_time = time.time()
+        while cap.isOpened():
+            # Capture frame-by-frame
+            ret, im = cap.read()
+            if ret:
+                if frame_counter >= 30 * start_frame[idx_vid]:
+                    # Get ROI only
+                    im[600:, :, :] = 0
+                    if lane_cctv.lane_estimate_flag == False:
+                        det_track_ret = lane_cctv.run(im)
+                    else:
+                        det_track_ret, bg_ret, grid_mask_ret, grid_ap_ret, grid_mask = lane_cctv.run(im)
+                        cv2.imshow('bg_ret', bg_ret)
+                        cv2.imshow('grid_mask_ret', grid_mask_ret)
+                        cv2.imshow('grid_ap_ret', grid_ap_ret)
+
+                        sam_masks, keep_mask_list, sam_viz = segment_bg_wSAM(bg_ret.copy(), lane_cctv.mask_generator)
+                        lane_divider_module = Lane_Divider_Module()
+                        final_sam_img, final_lane, vp, lane_p_list = lane_divider_module.run_v2(sam_masks, keep_mask_list,
+                                                                                             lane_cctv.track_grid_module.list_of_active_grid(), grid_mask,
+                                                                                             bg_ret.copy())
+                        if len(lane_p_list) == 0:
+                            break
+                        cv2.imshow('sam_viz', sam_viz)
+                        cv2.imwrite(vid_name_list[idx_vid] + '_final_lane.png', final_lane)
+
+                        eval_mat = evaluate_per_vid_v2(vid_name_list[idx_vid], h, w, vp, lane_p_list, bg_ret)
+                        cv2.imwrite(vid_name_list[idx_vid] + '_eval.png', eval_mat)
+                        end_time = time.time()
+                        print("Time: ", end_time - start_time)
+                        lane_cctv.lane_estimate_flag = False
+                        cv2.waitKey(1)
+                        break
+
+                    cv2.imshow('det_track_ret', det_track_ret)
+
+                    # break on pressing q
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    # print(vid_fol_pth + vid_name_list[idx_vid], frame_counter)
+
+                    if (frame_counter == end_frame[idx_vid] * 30) :
+                        lane_cctv.lane_estimate_flag = True
+                else:
+                    print('Skip %d-th frame \r'%frame_counter, )
+                frame_counter += 1
+            else:
+                break
+
+        cap.release()
+
+
+def main_debug():
+    vid_name_list = pita_Util_module.get_list_of_file_in_a_path(vid_fol_pth)
+    vid_name_list = sorted(vid_name_list)
+    # Prob: 2+3(too many lines), 4(Not good), 9(No lines), 10(Not good videos), 11(miss lines for right most lanes), 16(too many lines),
+    #               0    1    2    3    4    5    6     7    8   9   10  11   12  13   14  15   16   17   18   19  20
+    start_frame = [310, 180, 210, 270, 75,  110,  75, 550,  45, 150,  5, 25, 550,  5,  0,  90,   0,  30,  180,  70, 0]
+    end_frame =   [390, 260, 240, 300, 100, 170, 120, 600, 120, 210, 30, 95, 650, 90, 50, 165, 150, 105,  210, 165, 90]
+
+    # model = YOLO('yolov8m.pt')  # load a pretrained model (recommended for training)
+    # model = RTDETR('rtdetr-l.pt')
+
+    lane_cctv = Lane_Detection(show_flag=False)
+
+    test_idx = 6
+    # for idx_vid in range(0, len(vid_name_list)):
+    for idx_vid in range(test_idx, test_idx + 1):
+        # for idx_vid in range(0, 3):
+        print(vid_fol_pth + vid_name_list[idx_vid])
+
+        frame_counter = 0
+        first_frame, h, w = get_first_frame_from_vid(vid_fol_pth + vid_name_list[idx_vid])
+        cap = cv2.VideoCapture(vid_fol_pth + vid_name_list[idx_vid])
+        lane_cctv.new_vid_input(first_frame, h, w)
+
+        if (cap.isOpened() == False):
+            print("Error opening video stream or file")
+        _, frame = cap.read()
+
+        frame_counter = 0
+
+        start_time = time.time()
+        while cap.isOpened():
+            # Capture frame-by-frame
+            ret, im = cap.read()
+            if ret:
+                if frame_counter >= 30 * start_frame[idx_vid]:
+                    # Get ROI only
+                    im[600:, :, :] = 0
+
+                    det_track_ret, bg_ret, grid_mask_ret, grid_ap_ret, grid_mask = lane_cctv.run_debug(im)
+                    cv2.imshow('det_track_ret', det_track_ret)
+                    cv2.imshow('bg_ret', bg_ret)
+                    cv2.imshow('grid_mask_ret', grid_mask_ret)
+                    cv2.imshow('grid_ap_ret', grid_ap_ret)
+
+                    if (frame_counter == end_frame[idx_vid] * 30):
+                        sam_masks, keep_mask_list, sam_viz = segment_bg_wSAM(bg_ret.copy(), lane_cctv.mask_generator)
+                        lane_divider_module = Lane_Divider_Module()
+                        final_sam_img, final_lane, vp, lane_p_list = lane_divider_module.run(sam_masks, keep_mask_list,
+                                                                                             lane_cctv.track_grid_module.list_of_active_grid(),
+                                                                                             grid_mask, bg_ret.copy())
+                        cv2.imshow('sam_viz', sam_viz)
+                        cv2.imshow('final_lane', final_lane)
+                        cv2.waitKey(0)
+
+
+                        # cv2.imwrite(vid_name_list[idx_vid] + '_final_lane.png', final_lane)
+                        eval_mat = evaluate_per_vid(vid_name_list[idx_vid], h, w, vp, lane_p_list, bg_ret)
+                        # cv2.imwrite(vid_name_list[idx_vid] + '_eval.png', eval_mat)
+                        break
+                    # end_time = time.time()
+                    # print("Time: ", end_time - start_time)
+                    # lane_cctv.lane_estimate_flag = False
+
+                    # break on pressing q
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    # print(vid_fol_pth + vid_name_list[idx_vid], frame_counter)
+                frame_counter += 1
+            else:
+                break
+
+        cap.release()
+
+
+if __name__ == '__main__':
+    # evaluate()
+    main()
+    # main_debug()
