@@ -25,7 +25,8 @@ from scipy import stats
 
 class Lane_Divider_Module():
 	def __init__(self) -> None:
-		print('Run lane divider')
+		self.start_lane_divider = True
+		# print('Run lane divider')
 
 
 	def find_dist_to_line(self, point, line):
@@ -64,13 +65,14 @@ class Lane_Divider_Module():
 
 	def get_inliers_w_vanishing_point_catersian(self, vp, lines, threshold_dist2vp=10):
 		inliers = []
+		inliers_dist = []
 
 		for line in lines:
 			dist = self.find_dist_to_line_catersian(vp, line)
 			if (dist < threshold_dist2vp):
 				inliers.append(line)
-
-		return inliers
+				inliers_dist.append(dist)
+		return inliers, inliers_dist
 
 
 	def find_intersection_point(self, line1, line2):
@@ -612,7 +614,7 @@ class Lane_Divider_Module():
 		c = np.intersect1d(a, b)
 		return c.size == b.size
 
-	def merge_lines(self, line_list, contour_img):
+	def merge_lines(self, line_list, contour_img, dist_thresh=5):
 		extend_line_list = self.extend_lines(line_list)
 		matching_mat = np.zeros((len(extend_line_list), len(extend_line_list)))
 		for extend_idx, extend_line in enumerate(extend_line_list):
@@ -626,7 +628,7 @@ class Lane_Divider_Module():
 			for idx_normal, line in enumerate(line_list):
 				center_p = line[0]
 				a_dist = self.find_dist_to_line_catersian(center_p, extend_line)
-				if a_dist < 5:
+				if a_dist < dist_thresh:
 					matching_mat[extend_idx][idx_normal] = 1
 					contour_img = cv2.circle(contour_img, (int(center_p[0]), int(center_p[1])),
 												  10, (255, 0, 255), 1)
@@ -657,15 +659,81 @@ class Lane_Divider_Module():
 		remain_matching_group = [matching_mat_group[i] for i in remain_idx]
 		return remain_matching_group, contour_img
 
-	def run_develop(self, sam_masks, keep_mask_list, grid_ap, grid_mask, bg_img):
+	def remove_overlapped_lanes(self, h, w, detected_lanes, dist_to_vp_list):
+
+		import json
+		from shapely.geometry import Polygon
+
+		def get_area_between_2_lines(detected_lane, gt_lane, line_width=30):
+
+			def polygon_with_witdh(line, line_width):
+				line_rect = Polygon([
+					[line[0][0] - line_width, line[0][1]],
+					[line[0][0] + line_width, line[0][1]],
+					[line[1][0] + line_width, line[1][1]],
+					[line[1][0] - line_width, line[1][1]]
+				]
+				)
+				return line_rect
+
+			d_line_rect = polygon_with_witdh(detected_lane, line_width)
+			g_line_rect = polygon_with_witdh(gt_lane, line_width)
+
+			overlap_ratio = d_line_rect.intersection(g_line_rect).area / g_line_rect.area
+
+			return overlap_ratio
+
+		end_d_lanes = []
+		for d_lane in detected_lanes:
+			top_p = (int(d_lane[0][0]), int(d_lane[0][1]))
+			bot_p = (int(d_lane[1][0]), int(d_lane[1][1]))
+			end_d_lanes.append([top_p, bot_p])
+
+		overlap_check_list = np.zeros(len(end_d_lanes))
+		for idx_d, d_lane in enumerate(end_d_lanes):
+			if overlap_check_list[idx_d] == 0:
+				overlap_ratio_list = np.zeros(len(end_d_lanes))
+				for idx_d_check in range(0, len(end_d_lanes)):
+					if idx_d_check != idx_d and overlap_check_list[idx_d_check] == 0:
+						overlap_ratio_list[idx_d_check] = get_area_between_2_lines(d_lane, end_d_lanes[idx_d_check], line_width=5)
+				overlap_idx_list = np.where(overlap_ratio_list > 0.5)[0]
+				if (len(overlap_idx_list) > 0):
+					overlap_list = overlap_ratio_list > 0.5
+					overlap_list[idx_d] = True
+					overlap_list_idxes = np.where(overlap_list)[0]
+					dist_to_vp_overlap_list = [dist_to_vp_list[int(i)] for i in overlap_list_idxes]
+					cloest_idx = overlap_list_idxes[int(np.argmin(dist_to_vp_overlap_list))]
+					print(cloest_idx, overlap_list_idxes)
+					for idx in overlap_list_idxes:
+						if int(idx) != cloest_idx:
+							overlap_check_list[idx] = 2
+						else:
+							overlap_check_list[idx] = 1
+				else:
+					overlap_check_list[idx_d] = 1
+
+		refined_detected_lanes = []
+
+		for idx in range(0, len(overlap_check_list)):
+			if overlap_check_list[idx] == 1:
+				refined_detected_lanes.append(detected_lanes[idx])
+
+		return refined_detected_lanes
+
+			# best_ind_match = np.argmax(area_lanes_ratio[idx_d])
+			# area_lanes[idx_d][0] = best_ind_match
+			# area_lanes[idx_d][1] = area_lanes_ratio[idx_d][best_ind_match]
+
+	def run_v2(self, sam_masks, keep_mask_list, grid_ap, grid_mask, bg_img):
 		final_sam_img = self.upgrade_sam_mask(sam_masks, keep_mask_list, grid_mask, bg_img)
 		# cv2.imshow('final_sam_img', final_sam_img)
 
 		final_sam_img_gray = cv2.cvtColor(final_sam_img.astype(np.uint8), cv2.COLOR_BGR2GRAY)
 
-		_, final_sam_img_mask = cv2.threshold(final_sam_img_gray, 150, 255, cv2.THRESH_BINARY)
+		# _, final_sam_img_mask = cv2.threshold(final_sam_img_gray, 150, 255, cv2.THRESH_BINARY)
+		_, final_sam_img_mask = cv2.threshold(final_sam_img_gray, 120, 255, cv2.THRESH_BINARY)
 		mask_white_mask_canny = cv2.Canny(final_sam_img_mask, 1, 10, None, 3)
-		cv2.imshow('Canny', mask_white_mask_canny)
+		# cv2.imshow('Canny', mask_white_mask_canny)
 		# mask_white_mask_canny_copy = mask_white_mask_canny.copy()
 
 		kernel = np.ones((1, 1), np.uint8)
@@ -710,19 +778,23 @@ class Lane_Divider_Module():
 				# z = np.polyfit(x_arr, y_arr, 1)
 				x_top = -intercept / slope
 				x_bot = ((720 - 1) - intercept) / slope
-				contour_img_check = cv2.line(contour_img_check, (int(x_top), 0), (int(x_bot), 720-1), (255,255,0), 2)
+				# contour_img_check = cv2.line(contour_img_check, (int(x_top), 0), (int(x_bot), 720-1), (255,255,0), 2)
 				joined_lines.append([[x_top, 0], [x_bot, 720-1]])
+			# cv2.imshow("contour_img_check", contour_img_check)
+			# cv2.waitKey(0)
 
 		ransac_iterations, ransac_threshold, ransac_ratio = 350, 10, 0.95
 		ap_top = self.get_top_ap(grid_ap)
 		vanishing_point, extended_lines = self.RANSAC_catersian_form_best(joined_lines, ransac_iterations, ransac_threshold, ransac_ratio, ap_top)
-		confirmed_lines = self.get_inliers_w_vanishing_point_catersian(vanishing_point, extended_lines)
+		confirmed_lines, confirmed_lines_dist = self.get_inliers_w_vanishing_point_catersian(vanishing_point, extended_lines)
+		confirmed_lines = self.remove_overlapped_lanes(720, 1280, confirmed_lines, confirmed_lines_dist)
+
 		for confirmed_line in confirmed_lines:
 			# print(confirmed_line)
 			contour_img = cv2.line(contour_img, (int(confirmed_line[0][0]), int(confirmed_line[0][1])),
 									   (int(confirmed_line[1][0]), int(confirmed_line[1][1])), (255, 255, 0), 2)
-		print('vp: ', vanishing_point, len(confirmed_lines))
-		cv2.imshow('Contour', contour_img)
+		# print('vp: ', vanishing_point, len(confirmed_lines))
+		# cv2.imshow('Contour', contour_img)
 
 		if len(confirmed_lines) == 0:
 			print('Hough can not find any lines')
