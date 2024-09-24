@@ -23,13 +23,6 @@ Prepare for an updated version, include:
 
 ## Installation
 
-### Create conda env
-```Shell
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-```
-
-### Activate env
-
 ### Install conda and activate the environemnt
 ```Shell
 mkdir -p ~/miniconda3
