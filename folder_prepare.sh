@@ -18,13 +18,7 @@
 
 #!/bin/bash
 
-mkdir dataset
-mkdir dataset/selected_vid
-
 mkdir results
-mkdir results/bg_sub
-mkdir results/grid
-
-mkdir weights
+mkdir results/lane
 
 echo 'Folder generated'
