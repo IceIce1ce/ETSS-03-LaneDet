@@ -19,14 +19,13 @@
 import os
 from pathlib import Path
 
-
 class Pita_Util():
     def __init__(self, root_pth) -> None:
         self.root_pth = root_pth
 
     # Utils
     def create_folder(self, pth, verbose=False):
-        if (Path(pth).exists()):
+        if(Path(pth).exists()):
             pass
         else:
             os.mkdir(pth)
@@ -35,11 +34,11 @@ class Pita_Util():
             os.mkdir(pth + '/laneroi')
             os.mkdir(pth + '/segment')
 
-        if (verbose == True):
+        if(verbose == True):
             print('Save folder is generated!')
 
     def get_list_of_file_in_a_path(self, fol_path):
-
+    
         file_list = os.listdir(fol_path)
 
         # print(file_list)
