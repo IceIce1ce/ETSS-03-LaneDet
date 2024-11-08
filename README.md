@@ -120,8 +120,9 @@ python cctv_infer.py configs/clrnet/clr_resnet101_tusimple_cctv.py --test --load
 [trained-weights]: https://drive.google.com/drive/folders/1N3EUMyaFJnCrAWhJkmEpeWx39gCa3Mo_?usp=share_link
 --->
 
-### Reproduce results using F1 score metric. 
+
 <!---
+### Reproduce results using F1 score metric. 
 | Backbone                                                |    CULane     |   Tusimple    |
 |:--------------------------------------------------------|:-------------:|:-------------:|
 | CLRNet-Resnet18  / [CLRNet-Resnet18*][trained-weights]  | 79.58 / 79.49 | 97.89 / 97.82 |
