@@ -5,7 +5,7 @@
 
 ### Automation Lab, Sungkyunkwan University
   
-# Lane Detection for CCTV-cameras using Yolov8 + SegmentAnything + Adaptive Hough Transform with UI
+# Lane Detection for CCTV-cameras using Yolov8 + SegmentAnything + Adaptive Hough Transform with UI (v2.7.0)
 
 Prepare for an updated version, include:
 
